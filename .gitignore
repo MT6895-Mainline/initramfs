@@ -1,0 +1,4 @@
+root/init
+root/lib/firmware/mediatek/mt6895/WIFI
+initramfs.cpio
+initramfs.cpio.lz4

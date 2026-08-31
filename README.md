@@ -16,7 +16,8 @@ cp -r tmp-mount-nvdata/APCFG/APRDEB/WIFI root/lib/firmware/mediatek/mt6895/WIFI
 ## 4. Build `init` and package initramfs
 ```
 make clean
-make
+make # BOOT_PARTITION=\"/dev/sdc86\"
+# Default is /dev/sdc86, on xaga it's userdata.
 ```
 ## 5. Done
 ```

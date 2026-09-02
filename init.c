@@ -31,12 +31,14 @@
 #define WIFI_DST_ROOTFS "/newroot/lib/firmware/mediatek/mt6895/WIFI"
 
 /*
- * The WiFi/connectivity power-on is deferred until after switch_root, so the
- * firmware blobs it requests must also be present on the real rootfs.  These
- * are the ones the mt6895 connectivity stack loads (they ship in the
- * initramfs /lib/firmware); mirror them onto the mounted rootfs.
+ * Firmware that is requested after switch_root and so must also be present on
+ * the real rootfs (not just the initramfs tmpfs):
+ *  - WiFi/connectivity blobs loaded by the deferred mt6895 connectivity
+ *    power-on,
+ *  - Novatek touchscreen firmware needed at runtime resume.
+ * They all ship in the initramfs /lib/firmware; mirror them onto rootfs.
  */
-static const char *const WIFI_FW_FILES[] = {
+static const char *const ROOTFS_FW_FILES[] = {
     "BT_FW.cfg",
     "soc7_0_ram_bt_1b_t_1_hdr.bin",
     "soc7_0_ram_wmmcu_1b_t_1_hdr.bin",
@@ -44,6 +46,8 @@ static const char *const WIFI_FW_FILES[] = {
     "conninfra.cfg",
     "soc7_0_ram_mcu_1b_t_1_hdr.bin",
     "WIFI_RAM_CODE_soc7_0_1b_t_1.bin",
+    "novatek_nt36672e_l16_fw01.bin",
+    "novatek_nt36672e_l16_fw02.bin",
 };
 
 #define AT_FDCWD -100
@@ -317,9 +321,10 @@ static void copy_wifi_from_nvdata(void)
 }
 
 /*
- * The WiFi power-on runs after switch_root, so the connectivity firmware must
- * be on the real rootfs, not only in the initramfs tmpfs.  Mirror the WiFi
- * blobs from /lib/firmware (initramfs) to /newroot/lib/firmware (rootfs).
+ * Some firmware is only requested after switch_root (WiFi power-on, touch
+ * runtime resume), so it must be on the real rootfs, not only in the
+ * initramfs tmpfs.  Mirror the blobs from /lib/firmware (initramfs) to
+ * /newroot/lib/firmware (rootfs).
  */
 static void copy_firmware_to_rootfs(void)
 {
@@ -327,20 +332,20 @@ static void copy_firmware_to_rootfs(void)
     int i, nfiles;
 
     mkdir_p("/newroot/lib/firmware");
-    nfiles = (int)(sizeof(WIFI_FW_FILES) / sizeof(WIFI_FW_FILES[0]));
+    nfiles = (int)(sizeof(ROOTFS_FW_FILES) / sizeof(ROOTFS_FW_FILES[0]));
 
     for (i = 0; i < nfiles; i++) {
-        concat(src, "/lib/firmware/", WIFI_FW_FILES[i], sizeof(src));
-        concat(dst, "/newroot/lib/firmware/", WIFI_FW_FILES[i], sizeof(dst));
+        concat(src, "/lib/firmware/", ROOTFS_FW_FILES[i], sizeof(src));
+        concat(dst, "/newroot/lib/firmware/", ROOTFS_FW_FILES[i], sizeof(dst));
 
-        concat(msg, "CINIT: copying fw ", WIFI_FW_FILES[i], sizeof(msg));
+        concat(msg, "CINIT: copying fw ", ROOTFS_FW_FILES[i], sizeof(msg));
         kmsg(msg);
 
         if (copy_file(src, dst) == 0) {
-            concat(msg, "CINIT: copied fw ", WIFI_FW_FILES[i], sizeof(msg));
+            concat(msg, "CINIT: copied fw ", ROOTFS_FW_FILES[i], sizeof(msg));
             kmsg(msg);
         } else {
-            concat(msg, "CINIT: failed fw ", WIFI_FW_FILES[i], sizeof(msg));
+            concat(msg, "CINIT: failed fw ", ROOTFS_FW_FILES[i], sizeof(msg));
             kmsg(msg);
         }
     }

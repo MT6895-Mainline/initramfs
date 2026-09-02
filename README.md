@@ -1,27 +1,13 @@
 # Build initramfs for Redmi Note 11T Pro(+) / POCO X4 GT / Redmi K50i (xaga) Linux Mainline
-## 1. Readback `nvdata` partition
-```
-# Avoid using "dd if=/dev/block/by-name/nvdata of=/sdcard/nvdata.img", or readback image will be corrupted.
-# Use SP Flash Tool V6 instead.
-```
-## 2. Mount `nvdata`
-```
-mkdir tmp-mount-nvdata
-sudo mount nvdata.img tmp-mount-nvdata
-```
-## 3. Extract WIFI configuration
-```
-cp -r tmp-mount-nvdata/APCFG/APRDEB/WIFI root/lib/firmware/mediatek/mt6895/WIFI
-```
-## 4. Build `init` and package initramfs
+## 1. Build `init` and package initramfs
 ```
 make clean
-make # BOOT_PARTITION=\"/dev/sdc86\"
-# Default is /dev/sdc86, on xaga it's userdata.
+make # BOOT_PARTITION=\"/dev/sdc86\" NVDATA_PARTITION=\"/dev/sdc13\"
+# Default BOOT_PARTITION is /dev/sdc86. On xaga it's userdata.
+# Default NVDATA_PARTITION is /dev/sdc13. On xaga it's nvdata. Init will mount and copy WIFI configuration from nvdata.
 ```
-## 5. Done
+## 2. Done
 ```
-ls -l root/lib/firmware/mediatek/mt6895/WIFI
 ls -l root/init
 ls -l initramfs.cpio.lz4
 ```

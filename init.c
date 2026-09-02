@@ -2,14 +2,15 @@
  * XAGA no-libc C init - minimal:
  *   1. mount devtmpfs/proc/sysfs
  *   2. list disks (/dev/sd*)
- *   3. mount BOOT_PARTITION and switch_root to /sbin/init
+ *   3. mount nvdata (read-only), copy the WiFi NVRAM blob into the rootfs
+ *   4. mount BOOT_PARTITION and switch_root to /sbin/init
  *
  * Build:
  *   aarch64-linux-gnu-gcc -nostdlib -static -fno-stack-protector \
  *       -fno-builtin -ffreestanding -Os -o root/init init.c
  *
  * aarch64 syscall numbers:
- *   mount=40 openat=56 close=57 read=63 write=64 mkdirat=34
+ *   mount=40 umount2=39 openat=56 close=57 read=63 write=64 mkdirat=34
  *   chdir=49 chroot=51 nanosleep=101 getdents64=217 execve=221
  */
 
@@ -17,11 +18,42 @@
 #define BOOT_PARTITION "/dev/sdc86"
 #endif
 
+/* nvdata partition on xaga (mt6895), see /dev/disk/by-partlabel/nvdata */
+#ifndef NVDATA_PARTITION
+#define NVDATA_PARTITION "/dev/sdc13"
+#endif
+
+/* WiFi NVRAM blob lives on nvdata; the driver requests it from
+ * /lib/firmware/mediatek/mt6895/WIFI on the rootfs.
+ */
+#define NVDATA_WIFI_SRC "/nvdata/APCFG/APRDEB/WIFI"
+#define WIFI_DST_INITRAMFS "/lib/firmware/mediatek/mt6895/WIFI"
+#define WIFI_DST_ROOTFS "/newroot/lib/firmware/mediatek/mt6895/WIFI"
+
+/*
+ * The WiFi/connectivity power-on is deferred until after switch_root, so the
+ * firmware blobs it requests must also be present on the real rootfs.  These
+ * are the ones the mt6895 connectivity stack loads (they ship in the
+ * initramfs /lib/firmware); mirror them onto the mounted rootfs.
+ */
+static const char *const WIFI_FW_FILES[] = {
+    "BT_FW.cfg",
+    "soc7_0_ram_bt_1b_t_1_hdr.bin",
+    "soc7_0_ram_wmmcu_1b_t_1_hdr.bin",
+    "wifi.cfg",
+    "conninfra.cfg",
+    "soc7_0_ram_mcu_1b_t_1_hdr.bin",
+    "WIFI_RAM_CODE_soc7_0_1b_t_1.bin",
+};
+
 #define AT_FDCWD -100
 #define O_RDONLY 0
 #define O_WRONLY 1
+#define O_CREAT 0x40
+#define O_TRUNC 0x200
 #define O_NONBLOCK 0x800
 
+#define MS_RDONLY 1
 #define MS_NOSUID 2
 #define MS_NOEXEC 8
 #define MS_MOVE 0x2000
@@ -60,6 +92,11 @@ static long mount_(const char *src, const char *tgt, const char *fstype,
                    unsigned long flags, const void *data)
 {
     return ksys(40, (long)src, (long)tgt, (long)fstype, flags, (long)data);
+}
+
+static long umount2_(const char *tgt, long flags)
+{
+    return ksys(39, (long)tgt, flags, 0, 0, 0);
 }
 
 static long openat(long dirfd, const char *path, long flags, long mode)
@@ -120,6 +157,19 @@ static long strlen_(const char *s)
     return n;
 }
 
+/* Concatenate a + b into out (max bytes incl. NUL). */
+static void concat(char *out, const char *a, const char *b, long max)
+{
+    long n = 0;
+    long i;
+
+    for (i = 0; a[i] && n < max - 1; i++)
+        out[n++] = a[i];
+    for (i = 0; b[i] && n < max - 1; i++)
+        out[n++] = b[i];
+    out[n] = '\0';
+}
+
 static int starts_with(const char *s, const char *prefix)
 {
     int i;
@@ -153,6 +203,149 @@ static void sleep_ms(long ms)
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000;
     nanosleep(&ts, 0);
+}
+
+/* Wait up to ~5s for a block device node to appear. */
+static void wait_for_dev(const char *path)
+{
+    int i;
+
+    for (i = 0; i < 50; i++) {
+        if (exists(path))
+            return;
+        sleep_ms(100);
+    }
+}
+
+/* Create every directory component of an absolute path (ignore EEXIST). */
+static void mkdir_p(const char *path)
+{
+    char buf[256];
+    long n = 0;
+    long i;
+
+    if (path[0] != '/')
+        return;
+    buf[n++] = '/';
+
+    for (i = 1; path[i] != '\0'; i++) {
+        if (path[i] == '/') {
+            if (n > 1) {
+                buf[n] = '\0';
+                mkdirat(AT_FDCWD, buf, 0755);
+            }
+            buf[n++] = path[i];  /* keep the separator */
+            continue;
+        }
+        buf[n++] = path[i];
+    }
+    if (n > 1) {
+        buf[n] = '\0';
+        mkdirat(AT_FDCWD, buf, 0755);
+    }
+}
+
+/* Copy one file. Returns 0 on success, nonzero on failure. */
+static int copy_file(const char *src, const char *dst)
+{
+    unsigned char buf[4096];
+    long fd_in, fd_out, got, w;
+
+    fd_in = openat(AT_FDCWD, src, O_RDONLY, 0);
+    if (fd_in < 0)
+        return -1;
+
+    fd_out = openat(AT_FDCWD, dst, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd_out < 0) {
+        close_(fd_in);
+        return -1;
+    }
+
+    while ((got = read_(fd_in, buf, sizeof(buf))) > 0) {
+        long off = 0;
+        while (off < got) {
+            w = write_(fd_out, buf + off, got - off);
+            if (w <= 0) {
+                close_(fd_in);
+                close_(fd_out);
+                return -1;
+            }
+            off += w;
+        }
+    }
+
+    close_(fd_in);
+    close_(fd_out);
+    return 0;
+}
+
+/*
+ * Mount nvdata read-only and copy the WiFi NVRAM blob out of it.  The copy on
+ * the mounted rootfs (/newroot) is the important one, because the WiFi driver
+ * may load only after switch_root and the initramfs tmpfs is gone by then.
+ * Also place it in the initramfs tree for any early retry before the pivot.
+ */
+static void copy_wifi_from_nvdata(void)
+{
+    kmsg("CINIT: nvdata: waiting for ");
+    kmsg(NVDATA_PARTITION);
+    kmsg("\n");
+    wait_for_dev(NVDATA_PARTITION);
+
+    mkdirat(AT_FDCWD, "/nvdata", 0755);
+    if (mount_(NVDATA_PARTITION, "/nvdata", "ext4", MS_RDONLY, 0) != 0) {
+        kmsg("CINIT: nvdata mount failed (continuing without WiFi NVRAM)\n");
+        return;
+    }
+
+    if (!exists(NVDATA_WIFI_SRC)) {
+        kmsg("CINIT: nvdata WIFI blob not found (continuing)\n");
+    } else {
+        mkdir_p("/newroot/lib/firmware/mediatek/mt6895");
+        mkdir_p("/lib/firmware/mediatek/mt6895");
+        if (copy_file(NVDATA_WIFI_SRC, WIFI_DST_ROOTFS) == 0)
+            kmsg("CINIT: copied WiFi NVRAM to rootfs\n");
+        else
+            kmsg("CINIT: failed to copy WiFi NVRAM to rootfs\n");
+        if (copy_file(NVDATA_WIFI_SRC, WIFI_DST_INITRAMFS) == 0)
+            kmsg("CINIT: copied WiFi NVRAM to initramfs\n");
+        else
+            kmsg("CINIT: failed to copy WiFi NVRAM to initramfs\n");
+    }
+
+    umount2_("/nvdata", 0);
+}
+
+/*
+ * The WiFi power-on runs after switch_root, so the connectivity firmware must
+ * be on the real rootfs, not only in the initramfs tmpfs.  Mirror the WiFi
+ * blobs from /lib/firmware (initramfs) to /newroot/lib/firmware (rootfs).
+ */
+static void copy_firmware_to_rootfs(void)
+{
+    char src[128], dst[128], msg[160];
+    int i, nfiles;
+
+    mkdir_p("/newroot/lib/firmware");
+    nfiles = (int)(sizeof(WIFI_FW_FILES) / sizeof(WIFI_FW_FILES[0]));
+
+    for (i = 0; i < nfiles; i++) {
+        concat(src, "/lib/firmware/", WIFI_FW_FILES[i], sizeof(src));
+        concat(dst, "/newroot/lib/firmware/", WIFI_FW_FILES[i], sizeof(dst));
+
+        concat(msg, "CINIT: copying fw ", WIFI_FW_FILES[i], sizeof(msg));
+        kmsg(msg);
+
+        if (copy_file(src, dst) == 0) {
+            concat(msg, "CINIT: copied fw ", WIFI_FW_FILES[i], sizeof(msg));
+            kmsg(msg);
+        } else {
+            concat(msg, "CINIT: failed fw ", WIFI_FW_FILES[i], sizeof(msg));
+            kmsg(msg);
+        }
+    }
+
+    kmsg("CINIT: firmware mirror done\n");
 }
 
 /* Wait up to ~5s for any /dev/sd* to appear, then list them. */
@@ -215,6 +408,13 @@ static void boot_rootfs(void)
         for (;;)
             sleep_ms(60000);
     }
+
+    /* The WiFi driver is loaded after switch_root, so both the NVRAM blob
+     * and the connectivity firmware must be on the real rootfs (not the
+     * initramfs tmpfs).  Copy them out now, before we pivot.
+     */
+    copy_wifi_from_nvdata();
+    copy_firmware_to_rootfs();
 
     mkdirat(AT_FDCWD, "/newroot/proc", 0755);
     mount_("proc", "/newroot/proc", "proc", MS_NOSUID | MS_NOEXEC, 0);

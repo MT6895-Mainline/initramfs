@@ -30,6 +30,13 @@
 #define WIFI_DST_INITRAMFS "/lib/firmware/mediatek/mt6895/WIFI"
 #define WIFI_DST_ROOTFS "/newroot/lib/firmware/mediatek/mt6895/WIFI"
 
+/* BT address blob is also stored on nvdata; copy it out for the BT driver /
+ * userspace to apply before BlueZ starts.
+ */
+#define NVDATA_BT_ADDR_SRC "/nvdata/APCFG/APRDEB/BT_Addr"
+#define BT_ADDR_DST_INITRAMFS "/lib/firmware/mediatek/mt6895/BT_Addr"
+#define BT_ADDR_DST_ROOTFS "/newroot/lib/firmware/mediatek/mt6895/BT_Addr"
+
 /*
  * Firmware that is requested after switch_root and so must also be present on
  * the real rootfs (not just the initramfs tmpfs):
@@ -315,6 +322,21 @@ static void copy_wifi_from_nvdata(void)
             kmsg("CINIT: copied WiFi NVRAM to initramfs\n");
         else
             kmsg("CINIT: failed to copy WiFi NVRAM to initramfs\n");
+    }
+
+    if (!exists(NVDATA_BT_ADDR_SRC)) {
+        kmsg("CINIT: nvdata BT_Addr not found (continuing)\n");
+    } else {
+        mkdir_p("/newroot/lib/firmware/mediatek/mt6895");
+        mkdir_p("/lib/firmware/mediatek/mt6895");
+        if (copy_file(NVDATA_BT_ADDR_SRC, BT_ADDR_DST_ROOTFS) == 0)
+            kmsg("CINIT: copied BT_Addr to rootfs\n");
+        else
+            kmsg("CINIT: failed to copy BT_Addr to rootfs\n");
+        if (copy_file(NVDATA_BT_ADDR_SRC, BT_ADDR_DST_INITRAMFS) == 0)
+            kmsg("CINIT: copied BT_Addr to initramfs\n");
+        else
+            kmsg("CINIT: failed to copy BT_Addr to initramfs\n");
     }
 
     umount2_("/nvdata", 0);

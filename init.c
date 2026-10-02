@@ -45,6 +45,16 @@
  *  - Novatek touchscreen firmware needed at runtime resume.
  * They all ship in the initramfs /lib/firmware; mirror them onto rootfs.
  */
+#ifdef DEVICE_QQCANDY
+static const char *const ROOTFS_FW_FILES[] = {
+    "BT_FW.cfg", "conninfra.cfg", "wifi.cfg", "wifi_sigma.cfg", "txpowerctrl.cfg",
+    "soc7_0_ram_bt_1b_1_hdr.bin", "soc7_0_ram_bt_1b_t_1_hdr.bin",
+    "soc7_0_ram_mcu_1b_1_hdr.bin", "soc7_0_ram_mcu_1b_t_1_hdr.bin",
+    "soc7_0_ram_wmmcu_1b_1_hdr.bin", "WIFI_RAM_CODE_soc7_0_1b_1.bin",
+    "FW_NF_NT36672C_TIANMA.img", "aw8697_haptic.bin", "tfa98xx.cnt",
+    "arm/mali/arch10.8/mali_csffw.bin",
+};
+#else
 static const char *const ROOTFS_FW_FILES[] = {
     "BT_FW.cfg",
     "soc7_0_ram_bt_1b_t_1_hdr.bin",
@@ -56,6 +66,7 @@ static const char *const ROOTFS_FW_FILES[] = {
     "novatek_nt36672e_l16_fw01.bin",
     "novatek_nt36672e_l16_fw02.bin",
 };
+#endif
 
 #define AT_FDCWD -100
 #define O_RDONLY 0
@@ -200,6 +211,55 @@ static int exists(const char *path)
     return 1;
 }
 
+#ifdef DEVICE_QQCANDY
+/* devtmpfs has no udev by-partlabel links. Verify fixed, measured device nodes
+ * against sysfs before mounting them; never fall back to another partition.
+ */
+static int partition_matches(const char *dev, const char *label)
+{
+    char path[128], text[1024], expected[80];
+    long fd, got, i;
+    if (!starts_with(dev, "/dev/"))
+        return 0;
+    concat(path, "/sys/class/block/", dev + 5, sizeof(path));
+    concat(path, path, "/uevent", sizeof(path));
+    fd = openat(AT_FDCWD, path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    got = read_(fd, text, sizeof(text) - 1);
+    close_(fd);
+    if (got <= 0)
+        return 0;
+    text[got] = 0;
+    concat(expected, "PARTNAME=", label, sizeof(expected));
+    concat(expected, expected, "\n", sizeof(expected));
+    for (i = 0; i < got; i++)
+        if ((i == 0 || text[i - 1] == '\n') && starts_with(text + i, expected))
+            return 1;
+    return 0;
+}
+
+static int is_qqcandy(void)
+{
+    char text[256];
+    long fd, got, off = 0;
+    fd = openat(AT_FDCWD, "/proc/device-tree/compatible", O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    got = read_(fd, text, sizeof(text) - 1);
+    close_(fd);
+    if (got <= 0)
+        return 0;
+    text[got] = 0;
+    while (off < got) {
+        if (starts_with(text + off, "oplus,qqcandy") && text[off + 13] == 0)
+            return 1;
+        off += strlen_(text + off) + 1;
+    }
+    return 0;
+}
+#endif
+
 static long g_kmsg_fd = -1;
 
 static void kmsg(const char *s)
@@ -239,7 +299,7 @@ static void mkdir_p(const char *path)
         return;
     buf[n++] = '/';
 
-    for (i = 1; path[i] != '\0'; i++) {
+    for (i = 1; path[i] != '\0' && n < (long)sizeof(buf) - 1; i++) {
         if (path[i] == '/') {
             if (n > 1) {
                 buf[n] = '\0';
@@ -262,6 +322,9 @@ static int copy_file(const char *src, const char *dst)
     unsigned char buf[4096];
     long fd_in, fd_out, got, w;
 
+    /* Preserve an explicitly installed firmware/calibration file. */
+    if (exists(dst))
+        return 0;
     fd_in = openat(AT_FDCWD, src, O_RDONLY, 0);
     if (fd_in < 0)
         return -1;
@@ -287,7 +350,7 @@ static int copy_file(const char *src, const char *dst)
 
     close_(fd_in);
     close_(fd_out);
-    return 0;
+    return got < 0 ? -1 : 0;
 }
 
 /*
@@ -302,9 +365,16 @@ static void copy_wifi_from_nvdata(void)
     kmsg(NVDATA_PARTITION);
     kmsg("\n");
     wait_for_dev(NVDATA_PARTITION);
+#ifdef DEVICE_QQCANDY
+    if (!partition_matches(NVDATA_PARTITION, "nvdata")) {
+        kmsg("CINIT: nvdata PARTNAME mismatch, skipping calibration copy\n");
+        return;
+    }
+#endif
 
     mkdirat(AT_FDCWD, "/nvdata", 0755);
-    if (mount_(NVDATA_PARTITION, "/nvdata", "ext4", MS_RDONLY, 0) != 0) {
+    /* MS_RDONLY alone may replay a journal and write the protected partition. */
+    if (mount_(NVDATA_PARTITION, "/nvdata", "ext4", MS_RDONLY, "noload") != 0) {
         kmsg("CINIT: nvdata mount failed (continuing without WiFi NVRAM)\n");
         return;
     }
@@ -354,6 +424,7 @@ static void copy_firmware_to_rootfs(void)
     int i, nfiles;
 
     mkdir_p("/newroot/lib/firmware");
+    mkdir_p("/newroot/lib/firmware/arm/mali/arch10.8");
     nfiles = (int)(sizeof(ROOTFS_FW_FILES) / sizeof(ROOTFS_FW_FILES[0]));
 
     for (i = 0; i < nfiles; i++) {
@@ -423,11 +494,19 @@ static void list_disks(void)
 /* Mount BOOT_PARTITION at /newroot, move it over /, and exec /sbin/init. */
 static void boot_rootfs(void)
 {
-    const char *argv[2], *envp[3];
+    const char *argv[2], *envp[4];
 
     kmsg("CINIT: mounting ");
     kmsg(BOOT_PARTITION);
     kmsg("\n");
+    wait_for_dev(BOOT_PARTITION);
+#ifdef DEVICE_QQCANDY
+    if (!is_qqcandy() || !partition_matches(BOOT_PARTITION, "userdata")) {
+        kmsg("CINIT: board/userdata mismatch, refusing to mount\n");
+        for (;;)
+            sleep_ms(60000);
+    }
+#endif
 
     mkdirat(AT_FDCWD, "/newroot", 0755);
     if (mount_(BOOT_PARTITION, "/newroot", "ext4", 0, 0) != 0) {
@@ -461,16 +540,19 @@ static void boot_rootfs(void)
            MS_NOSUID | MS_NOEXEC, 0);
 
     kmsg("CINIT: switch_root -> /sbin/init\n");
-    chdir_("/newroot");
-    mount_(".", "/", 0, MS_MOVE, 0);
-    chroot_(".");
-    chdir_("/");
+    if (chdir_("/newroot") || mount_(".", "/", 0, MS_MOVE, 0) ||
+        chroot_(".") || chdir_("/")) {
+        kmsg("CINIT: switch_root failed\n");
+        for (;;)
+            sleep_ms(60000);
+    }
 
     argv[0] = "/sbin/init";
     argv[1] = 0;
     envp[0] = "HOME=/";
     envp[1] = "TERM=linux";
-    envp[2] = 0;
+    envp[2] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
+    envp[3] = 0;
     execve_("/sbin/init", argv, envp);
 
     kmsg("CINIT: exec /sbin/init failed\n");

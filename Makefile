@@ -1,39 +1,44 @@
-# Build the minimal XAGA initramfs:
-#   - compile init.c to root/init
-#   - pack root/ into ../initramfs.cpio.lz4
-#
-# Usage:
-#   make -C initramfs
-#   make -C initramfs BOOT_PARTITION=/dev/sdc86
-#   make -C initramfs clean
+DEVICE ?= qqcandy
+ifeq ($(filter $(DEVICE),qqcandy xaga),)
+$(error DEVICE must be qqcandy or xaga)
+endif
+include profiles/$(DEVICE).mk
 
 CROSS ?= aarch64-linux-gnu-
 CC := $(CROSS)gcc
 CPIO ?= cpio
 LZ4 ?= lz4
-
-BOOT_PARTITION ?= /dev/sdc86
-
-ROOT := $(CURDIR)/root
+FIRMWARE_DIR ?=
+ROOT := $(CURDIR)/build/$(DEVICE)/root
 INIT := $(ROOT)/init
-OUT_LZ4 := $(CURDIR)/initramfs.cpio.lz4
-TMP_CPIO := $(CURDIR)/initramfs.cpio
+OUT := $(CURDIR)/initramfs-$(DEVICE).cpio.lz4
+CFLAGS := -nostdlib -static -no-pie -fno-stack-protector \
+          -fno-builtin -ffreestanding -Os -Wall -Wextra -Werror
 
-CFLAGS := -nostdlib -static -fno-stack-protector \
-          -fno-builtin -ffreestanding -Os
+.PHONY: all clean FORCE
+all: $(OUT)
 
-.PHONY: all clean
-all: $(OUT_LZ4)
+# Config/partition changes must invalidate init even without source changes.
+$(INIT): init.c profiles/$(DEVICE).mk FORCE
+	rm -rf "$(ROOT)"
+	mkdir -p "$(ROOT)/dev" "$(ROOT)/proc" "$(ROOT)/sys"
+	$(CC) $(CFLAGS) $(DEVICE_CPPFLAGS) \
+		-DBOOT_PARTITION=\"$(BOOT_PARTITION)\" \
+		-DNVDATA_PARTITION=\"$(NVDATA_PARTITION)\" -o "$@" init.c
 
-$(INIT): init.c
-	rm -f $(ROOT)/sys/init
-	$(CC) $(CFLAGS) -DBOOT_PARTITION=\"$(BOOT_PARTITION)\" -o $@ init.c
-
-$(TMP_CPIO): $(INIT)
-	cd $(ROOT) && find . -print | $(CPIO) -o -H newc > $@
-
-$(OUT_LZ4): $(TMP_CPIO)
-	$(LZ4) -l -9 -f $< $@ >/dev/null
+$(OUT): $(INIT)
+	@if [ -n "$(FIRMWARE_DIR)" ]; then \
+		test -d "$(FIRMWARE_DIR)" || exit 1; \
+		test ! -e "$(FIRMWARE_DIR)/mediatek/mt6895/WIFI" || \
+			{ echo "Refusing device-specific NVRAM in archive" >&2; exit 1; }; \
+		test ! -e "$(FIRMWARE_DIR)/mediatek/mt6895/BT_Addr" || exit 1; \
+		mkdir -p "$(ROOT)/lib/firmware"; \
+		cp -a "$(FIRMWARE_DIR)/." "$(ROOT)/lib/firmware/"; \
+	fi
+	cd "$(ROOT)" && find . -print0 | LC_ALL=C sort -z | \
+		$(CPIO) --null -o -H newc --owner=0:0 > "$(OUT:.lz4=)"
+	$(LZ4) -l -9 -f "$(OUT:.lz4=)" "$@"
 
 clean:
-	rm -f $(INIT) $(ROOT)/sys/init $(TMP_CPIO) $(OUT_LZ4)
+	rm -rf "$(CURDIR)/build/$(DEVICE)"
+	rm -f "$(OUT)" "$(OUT:.lz4=)"

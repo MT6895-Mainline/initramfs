@@ -30,6 +30,14 @@ calibration. A private local build may explicitly set `FIRMWARE_DIR=/path/to/blo
 the known WIFI/BT_Addr calibration paths are rejected. Do not publish private
 firmware archives without checking licenses and all device-specific contents.
 
+qqcandy packages `/init` and `/xinit` as hard links to the same executable.
+Its kernel forces `rdinit=/xinit`; the matching rootfs build must embed the
+source-built `.cpio` using `CONFIG_INITRAMFS_SOURCE`. An external header-v4
+ramdisk alone is not a verified qqcandy boot route. Before persistent IO,
+the guarded qqcandy init applies and reads back the working UFS controller
+and descendant SCSI `power/control=on` policy. Xaga's entry and power behavior
+remain unchanged. See [qqcandy boot requirements](README.qqcandy.md).
+
 At boot, nvdata is mounted read-only with ext4 journal replay disabled (`noload`).
 WiFi/BT calibration may be copied to the rootfs, without overwriting an existing
 file. This does not write nvdata. Required firmware/kernel modules still need
@@ -45,11 +53,15 @@ make DEVICE=qqcandy clean
 
 ```sh
 bash tests/archive.sh
+bash tests/power-policy.sh
 ```
 
 Offline tests pass for both source-only archives, ARM64/static ELF, qqcandy
 profile strings, private calibration rejection, and removal of stale firmware
 between builds. These tests do not prove device boot or test live NV access.
+Power-policy tests cover board/partition rejection, readback/short-write
+failures, SCSI enumeration/link failures and unrelated-controller isolation,
+under host ASan/UBSan and QEMU ARM64.
 This branch has not been flashed as part of the rootfs integration work.
 
 Pair this with a matching [kernel](https://github.com/MT6895-Mainline/linux),

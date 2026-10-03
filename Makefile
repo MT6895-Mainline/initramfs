@@ -25,6 +25,7 @@ $(INIT): init.c profiles/$(DEVICE).mk FORCE
 	$(CC) $(CFLAGS) $(DEVICE_CPPFLAGS) \
 		-DBOOT_PARTITION=\"$(BOOT_PARTITION)\" \
 		-DNVDATA_PARTITION=\"$(NVDATA_PARTITION)\" -o "$@" init.c
+	@if [ "$(DEVICE)" = qqcandy ]; then ln "$(INIT)" "$(ROOT)/xinit"; fi
 
 $(OUT): $(INIT)
 	@if [ -n "$(FIRMWARE_DIR)" ]; then \

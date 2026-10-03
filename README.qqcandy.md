@@ -11,6 +11,11 @@ make DEVICE=xaga                          # legacy explicit profile
 
 Outputs are `initramfs-<device>.cpio.lz4`; staging is isolated in
 `build/<device>/root`. No tracked Xaga firmware is packed implicitly.
+The qqcandy archive includes both `/init` and `/xinit` as hard links. The
+device kernel forces `rdinit=/xinit`; embed the uncompressed `.cpio` through
+`CONFIG_INITRAMFS_SOURCE` when building that kernel. Merely attaching an
+external ramdisk to boot header v4 is not a verified boot path on qqcandy:
+the device has booted its old embedded init after external decoding failed.
 An optional external firmware directory must contain only files appropriate
 for the selected board. Never include WIFI/BT_Addr device calibration in
 published archives. No automatic download or flashing is performed.
@@ -20,6 +25,10 @@ qqcandy init verifies the board compatible and PARTNAME in sysfs before
 mounting; a mismatch stops boot rather than using another partition.
 Nvdata is mounted ext4 read-only with `noload` (no journal replay). Calibration
 is copied only if a rootfs file is absent. No modem NV partition is modified.
+Before persistent IO, the qqcandy init verifies the board/partition and sets
+the measured UFS controller and its SCSI descendants' `power/control` to
+`on`, matching the working device init. Each applied policy is read back;
+failure stops boot. No MMIO, clock, reset or Xaga power policy is changed.
 
 The firmware mirror list comes from the board's working kernel firmware
 configuration, not the Xaga touch panel. QQcandy uses NT36672C Tianma, not

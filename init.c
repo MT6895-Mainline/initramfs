@@ -97,6 +97,10 @@ struct dirent64 {
 
 static long ksys(long n, long a, long b, long c, long d, long e)
 {
+#ifdef INIT_TEST
+    extern long test_syscall(long, long, long, long, long, long);
+    return test_syscall(n, a, b, c, d, e);
+#else
     register long x0 asm("x0") = a;
     register long x1 asm("x1") = b;
     register long x2 asm("x2") = c;
@@ -108,6 +112,7 @@ static long ksys(long n, long a, long b, long c, long d, long e)
                  : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
                  : "memory");
     return x0;
+#endif
 }
 
 static long mount_(const char *src, const char *tgt, const char *fstype,
@@ -287,6 +292,85 @@ static void wait_for_dev(const char *path)
         sleep_ms(100);
     }
 }
+
+#ifdef DEVICE_QQCANDY
+static int contains(const char *text, const char *part)
+{
+    long i;
+    for (i = 0; text[i]; i++)
+        if (starts_with(text + i, part))
+            return 1;
+    return 0;
+}
+
+static int keep_power_on(const char *path)
+{
+    char value[8];
+    long fd = openat(AT_FDCWD, path, O_WRONLY, 0), written, got;
+    if (fd < 0)
+        return -1;
+    written = write_(fd, "on", 2);
+    close_(fd);
+    if (written != 2)
+        return -1;
+    fd = openat(AT_FDCWD, path, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    got = read_(fd, value, sizeof(value));
+    close_(fd);
+    return got == 3 && value[0] == 'o' && value[1] == 'n' && value[2] == '\n' ? 0 : -1;
+}
+
+/* Preserve the working qqcandy init's UFS policy before persistent IO. */
+static int keep_ufs_awake(void)
+{
+    unsigned char entries[4096];
+    char path[256], link[1024];
+    long directory, got, off;
+    int matched = 0, failed = 0;
+    if (!is_qqcandy() || !partition_matches(BOOT_PARTITION, "userdata"))
+        return -1;
+    if (keep_power_on("/sys/bus/platform/devices/112b0000.ufshci/power/control"))
+        return -1;
+    directory = openat(AT_FDCWD, "/sys/bus/scsi/devices", O_RDONLY, 0);
+    if (directory < 0)
+        return -1;
+    while ((got = getdents64(directory, entries, sizeof(entries))) > 0) {
+        for (off = 0; off < got;) {
+            struct dirent64 *entry = (struct dirent64 *)(entries + off);
+            long length;
+            if (entry->d_reclen < sizeof(struct dirent64) || entry->d_reclen > got - off) {
+                failed = 1;
+                break;
+            }
+            off += entry->d_reclen;
+            if (entry->d_name[0] == '.')
+                continue;
+            concat(path, "/sys/bus/scsi/devices/", entry->d_name, sizeof(path));
+            length = ksys(78, AT_FDCWD, (long)path, (long)link, sizeof(link) - 1, 0);
+            if (length <= 0) {
+                failed = 1;
+                break;
+            }
+            link[length] = 0;
+            if (!contains(link, "/112b0000.ufshci/"))
+                continue;
+            concat(path, path, "/power/control", sizeof(path));
+            if (!exists(path))
+                continue;
+            matched++;
+            if (keep_power_on(path)) {
+                failed = 1;
+                break;
+            }
+        }
+        if (failed)
+            break;
+    }
+    close_(directory);
+    return failed || got < 0 || !matched ? -1 : 0;
+}
+#endif
 
 /* Create every directory component of an absolute path (ignore EEXIST). */
 static void mkdir_p(const char *path)
@@ -560,6 +644,7 @@ static void boot_rootfs(void)
         sleep_ms(60000);
 }
 
+#ifndef INIT_TEST
 void _start(void)
 {
     mkdirat(AT_FDCWD, "/dev", 0755);
@@ -578,6 +663,15 @@ void _start(void)
 
     kmsg("CINIT: minimal init start\n");
 
+#ifdef DEVICE_QQCANDY
+    wait_for_dev(BOOT_PARTITION);
+    if (keep_ufs_awake()) {
+        kmsg("CINIT: qqcandy UFS power policy guard failed, refusing persistent IO\n");
+        for (;;)
+            sleep_ms(60000);
+    }
+    kmsg("CINIT: qqcandy UFS power policy verified\n");
+#endif
     list_disks();
     boot_rootfs();
 
@@ -585,3 +679,4 @@ void _start(void)
     for (;;)
         ;
 }
+#endif
